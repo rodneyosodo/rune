@@ -40,6 +40,11 @@ impl<T: 'static> Overlay<T> {
                 self.dirty |= self.rt.key_up(key);
                 return;
             }
+            Input::Focus(focused) => {
+                self.rt.window_focus(focused);
+                self.dirty = true;
+                return;
+            }
             Input::Physical(event, fallback) => {
                 let keep = matches!(event, crate::PhysicalInput::Key { pressed: true, .. }) || self.rt.wants_key_up();
                 self.dirty |= self.rt.physical_with_fallback(event, fallback.filter(|_| keep));

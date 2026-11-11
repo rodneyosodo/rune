@@ -31,6 +31,9 @@ use crate::{OverlayInput, OverlayOptions, OverlayPlacement};
 
 pub(crate) enum Input {
     Move(f32, f32), Leave, Button(bool), Secondary(bool), Key(crate::KeyEvent), KeyUp(crate::KeyEvent),
+    /// The surface gained or lost keyboard focus. A layer surface is not a toplevel, so winit
+    /// never reports `WindowEvent::Focused` for it.
+    Focus(bool),
     Physical(crate::PhysicalInput, Option<crate::KeyEvent>),
 }
 
@@ -84,7 +87,12 @@ impl Dispatch<WlSeat, ()> for State {
 impl State {
     /// The keyboard's focus on our surface. One writer: a focus can't outlive the keyboard this
     /// side took away.
-    fn set_keyboard_focus(&mut self, focused: bool) { self.keyboard_focus = focused; }
+    fn set_keyboard_focus(&mut self, focused: bool) {
+        if self.keyboard_focus != focused {
+            self.keyboard_focus = focused;
+            self.input.push(Input::Focus(focused));
+        }
+    }
 
     fn update_seat(&mut self, seat: &WlSeat, qh: &QueueHandle<Self>) {
         let caps = self.capabilities.unwrap_or_else(wl_seat::Capability::empty);
@@ -173,11 +181,19 @@ impl Dispatch<WlKeyboard, ()> for State {
                 state.input.push(Input::Physical(crate::PhysicalInput::FocusLost, None));
             }
             wl_keyboard::Event::Keymap { format: wayland_client::WEnum::Value(wl_keyboard::KeymapFormat::XkbV1), fd, size } => {
-                use std::io::Read;
-                let mut map = String::new();
-                if size <= 16 * 1024 * 1024 && std::fs::File::from(fd).take(u64::from(size)).read_to_string(&mut map).is_ok() {
-                    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-                    state.xkb = xkb::Keymap::new_from_string(&context, map.trim_end_matches('\0').to_owned(), xkb::KEYMAP_FORMAT_TEXT_V1, xkb::COMPILE_NO_FLAGS).map(|map| xkb::State::new(&map));
+                use std::os::unix::fs::FileExt;
+                let file = std::fs::File::from(fd);
+                // The fd is a shared, read-only open file description, and its offset can
+                // already be at EOF (Hyprland sends it that way, and another client may have
+                // read it). A plain `read` would then return 0 bytes and every key would be
+                // dropped. `read_exact_at` reads at offset 0 without moving the shared offset.
+                if size <= 16 * 1024 * 1024 {
+                    let mut buf = vec![0u8; size as usize];
+                    if file.read_exact_at(&mut buf, 0).is_ok() {
+                        let map = String::from_utf8_lossy(&buf);
+                        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+                        state.xkb = xkb::Keymap::new_from_string(&context, map.trim_end_matches('\0').to_owned(), xkb::KEYMAP_FORMAT_TEXT_V1, xkb::COMPILE_NO_FLAGS).map(|map| xkb::State::new(&map));
+                    }
                 }
             }
             wl_keyboard::Event::Modifiers { mods_depressed, mods_latched, mods_locked, group, .. } => {
